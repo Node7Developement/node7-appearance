@@ -1,0 +1,29 @@
+CREATE TABLE IF NOT EXISTS `player_skins` (
+    `citizenid` VARCHAR(64) NOT NULL,
+    `model` VARCHAR(64) NOT NULL DEFAULT 'mp_male',
+    `skin` LONGTEXT NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`citizenid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `player_clothing` (
+    `citizenid` VARCHAR(64) NOT NULL,
+    `clothing` LONGTEXT NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`citizenid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `player_clothing_outfits` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `citizenid` VARCHAR(64) NOT NULL,
+    `name` VARCHAR(64) NOT NULL,
+    `clothing` LONGTEXT NOT NULL,
+    `is_default` TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_citizenid_name` (`citizenid`, `name`),
+    KEY `idx_citizenid` (`citizenid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

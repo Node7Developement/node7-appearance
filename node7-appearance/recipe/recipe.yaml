@@ -1,0 +1,9 @@
+$engine: 3
+name: NODE7 Appearance
+version: 1.0.0
+author: NODE7 Development Studios
+description: NODE7 ox_lib appearance, creator, clothing, and wardrobe resource for RedM.
+tasks:
+  - action: connect_database
+  - action: query_database
+    file: ./sql/appearance.sql
