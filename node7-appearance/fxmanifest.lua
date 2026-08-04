@@ -7,7 +7,7 @@ lua54 'yes'
 
 author 'NODE7 Development Studios'
 description 'NODE7 Appearance - ox_lib RedM appearance, creator, clothing, and wardrobe system'
-version '1.0.1'
+version '1.1.0'
 
 shared_scripts {
     '@ox_lib/init.lua',

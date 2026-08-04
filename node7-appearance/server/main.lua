@@ -1,14 +1,16 @@
 local Config = Node7AppearanceConfig or {}
-local RESOURCE_NAME = GetCurrentResourceName()
 
 local function log(message)
     print(('[node7-appearance] %s'):format(message))
 end
 
-local function debugLog(message)
-    if Config.Debug then
-        log(message)
+local function cloneTable(input)
+    if type(input) ~= 'table' then return input end
+    local output = {}
+    for key, value in pairs(input) do
+        output[key] = cloneTable(value)
     end
+    return output
 end
 
 local function notify(src, description, notifyType)
@@ -130,21 +132,24 @@ AddEventHandler('Node7Core:Server:PlayerLoaded', function(player)
 end)
 
 local function normalizeSkin(skin)
-    if type(skin) ~= 'table' then skin = {} end
-    local defaults = Config.DefaultSkin or {}
-    for key, value in pairs(defaults) do
-        if skin[key] == nil or skin[key] == '' then
-            skin[key] = value
+    local normalized = type(skin) == 'table' and (cloneTable(skin) or {}) or {}
+    for key, value in pairs(Config.DefaultSkin or {}) do
+        if normalized[key] == nil or normalized[key] == '' then
+            normalized[key] = value
         end
     end
-    skin.sex = tonumber(skin.sex) == 2 and 2 or 1
-    skin.model = skin.sex == 2 and 'mp_female' or 'mp_male'
-    return skin
+    normalized.sex = tonumber(normalized.sex) == 2 and 2 or 1
+    normalized.model = normalized.sex == 2 and 'mp_female' or 'mp_male'
+    return normalized
 end
 
 local function normalizeClothes(clothes)
-    if type(clothes) ~= 'table' then return {} end
-    return clothes
+    return type(clothes) == 'table' and (cloneTable(clothes) or {}) or {}
+end
+
+local function normalizeOutfitName(value)
+    local name = tostring(value or ''):gsub('[%c]', ''):gsub('^%s+', ''):gsub('%s+$', '')
+    return name:sub(1, 64)
 end
 
 local function ensureTables()
@@ -186,10 +191,11 @@ local function ensureTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
-    -- Backward compatibility for older rsg-appearance style rows if a clothes column already exists/gets added.
-    pcall(function()
+    -- Backward compatibility for older rsg-appearance rows without retrying a failing ALTER every restart.
+    local legacyColumn = MySQL.query.await("SHOW COLUMNS FROM `player_skins` LIKE 'clothes'") or {}
+    if not legacyColumn[1] then
         MySQL.query.await('ALTER TABLE `player_skins` ADD COLUMN `clothes` LONGTEXT NULL AFTER `skin`')
-    end)
+    end
 end
 
 CreateThread(function()
@@ -198,7 +204,7 @@ CreateThread(function()
     if not ok then
         log(('table setup failed: %s'):format(tostring(err)))
     end
-    log('started v1.0.0')
+    log('started v1.1.0')
 end)
 
 local function getSkin(citizenid)
@@ -245,15 +251,16 @@ end
 local function saveClothes(citizenid, clothes)
     if not citizenid then return false, 'missing citizenid' end
     clothes = normalizeClothes(clothes)
+    local encodedClothes = json.encode(clothes)
     MySQL.query.await([[
         INSERT INTO `player_clothing` (citizenid, clothing)
         VALUES (?, ?)
         ON DUPLICATE KEY UPDATE
             clothing = VALUES(clothing),
             updated_at = CURRENT_TIMESTAMP
-    ]], { citizenid, json.encode(clothes) })
+    ]], { citizenid, encodedClothes })
     pcall(function()
-        MySQL.query.await('UPDATE `player_skins` SET clothes = ? WHERE citizenid = ?', { json.encode(clothes), citizenid })
+        MySQL.query.await('UPDATE `player_skins` SET clothes = ? WHERE citizenid = ?', { encodedClothes, citizenid })
     end)
     return true, clothes
 end
@@ -271,6 +278,71 @@ local function getOutfits(citizenid)
         }
     end
     return outfits
+end
+
+local function requireCitizenId(src)
+    local citizenid = getCitizenId(src)
+    if citizenid then return citizenid end
+    notify(src, 'No active NODE7 character found.', 'error')
+    return nil
+end
+
+local function saveOutfit(citizenid, clothes, outfitName)
+    if not citizenid then return false, 'missing citizenid' end
+
+    local name = normalizeOutfitName(outfitName)
+    if name == '' then return false, 'Outfit name missing.' end
+
+    local normalizedClothes = normalizeClothes(clothes)
+    MySQL.query.await([[
+        INSERT INTO `player_clothing_outfits` (citizenid, name, clothing)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            clothing = VALUES(clothing),
+            updated_at = CURRENT_TIMESTAMP
+    ]], { citizenid, name, json.encode(normalizedClothes) })
+
+    return true, name
+end
+
+local function deleteOutfit(citizenid, idOrName)
+    if not citizenid then return false end
+
+    local id = tonumber(idOrName)
+    if id then
+        MySQL.query.await('DELETE FROM `player_clothing_outfits` WHERE citizenid = ? AND id = ?', { citizenid, id })
+    else
+        local name = normalizeOutfitName(idOrName)
+        if name == '' then return false end
+        MySQL.query.await('DELETE FROM `player_clothing_outfits` WHERE citizenid = ? AND name = ?', { citizenid, name })
+    end
+    return true
+end
+
+local function sendSavedAppearance(src, openCreatorWhenMissing)
+    local citizenid = getCitizenId(src)
+    if not citizenid then
+        if openCreatorWhenMissing then
+            TriggerClientEvent('node7-appearance:client:openCreator', src)
+        else
+            notify(src, 'No active NODE7 character found.', 'error')
+        end
+        return false
+    end
+
+    local skin = getSkin(citizenid)
+    local clothes = getClothes(citizenid)
+    if skin then
+        TriggerClientEvent('node7-appearance:client:ApplySkin', src, skin, clothes)
+        return true
+    end
+
+    if openCreatorWhenMissing then
+        TriggerClientEvent('node7-appearance:client:openCreator', src)
+    else
+        notify(src, 'No saved appearance found.', 'error')
+    end
+    return false
 end
 
 lib.callback.register('node7-appearance:server:getState', function(source)
@@ -303,7 +375,9 @@ end)
 
 RegisterNetEvent('node7-appearance:server:saveSkin', function(skin)
     local src = source
-    local citizenid = getCitizenId(src)
+    local citizenid = requireCitizenId(src)
+    if not citizenid then return end
+
     local ok, result = saveSkin(citizenid, skin)
     if not ok then
         notify(src, result or 'Skin save failed.', 'error')
@@ -314,7 +388,9 @@ end)
 
 RegisterNetEvent('node7-appearance:server:saveClothes', function(clothes)
     local src = source
-    local citizenid = getCitizenId(src)
+    local citizenid = requireCitizenId(src)
+    if not citizenid then return end
+
     local ok, result = saveClothes(citizenid, clothes)
     if not ok then
         notify(src, result or 'Clothing save failed.', 'error')
@@ -325,51 +401,31 @@ end)
 
 RegisterNetEvent('node7-appearance:server:saveOutfit', function(clothes, outfitName)
     local src = source
-    local citizenid = getCitizenId(src)
-    if not citizenid then
-        notify(src, 'No active NODE7 character found.', 'error')
+    local citizenid = requireCitizenId(src)
+    if not citizenid then return end
+
+    local ok, result = saveOutfit(citizenid, clothes, outfitName)
+    if not ok then
+        notify(src, result or 'Outfit save failed.', 'error')
         return
     end
-
-    outfitName = tostring(outfitName or ''):gsub('^%s+', ''):gsub('%s+$', '')
-    if outfitName == '' then
-        notify(src, 'Outfit name missing.', 'error')
-        return
-    end
-
-    clothes = normalizeClothes(clothes)
-    MySQL.query.await([[
-        INSERT INTO `player_clothing_outfits` (citizenid, name, clothing)
-        VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            clothing = VALUES(clothing),
-            updated_at = CURRENT_TIMESTAMP
-    ]], { citizenid, outfitName, json.encode(clothes) })
-    notify(src, ('Outfit saved: %s'):format(outfitName), 'success')
+    notify(src, ('Outfit saved: %s'):format(result), 'success')
 end)
 
 RegisterNetEvent('node7-appearance:server:deleteOutfit', function(idOrName)
     local src = source
-    local citizenid = getCitizenId(src)
+    local citizenid = requireCitizenId(src)
     if not citizenid then return end
 
-    local id = tonumber(idOrName)
-    if id then
-        MySQL.query.await('DELETE FROM `player_clothing_outfits` WHERE citizenid = ? AND id = ?', { citizenid, id })
+    if deleteOutfit(citizenid, idOrName) then
+        notify(src, 'Outfit deleted.', 'success')
     else
-        MySQL.query.await('DELETE FROM `player_clothing_outfits` WHERE citizenid = ? AND name = ?', { citizenid, tostring(idOrName or '') })
+        notify(src, 'Outfit could not be deleted.', 'error')
     end
-    notify(src, 'Outfit deleted.', 'success')
 end)
 
 RegisterNetEvent('node7-appearance:server:loadSaved', function()
-    local src = source
-    local citizenid = getCitizenId(src)
-    if not citizenid then
-        notify(src, 'No active NODE7 character found.', 'error')
-        return
-    end
-    TriggerClientEvent('node7-appearance:client:ApplySkin', src, getSkin(citizenid), getClothes(citizenid))
+    sendSavedAppearance(source, false)
 end)
 
 RegisterNetEvent('node7-appearance:server:setBucket', function(bucket, random)
@@ -383,49 +439,34 @@ end)
 
 -- Compatibility aliases for converted resources expecting rsg-appearance names.
 RegisterNetEvent('rsg-appearance:server:SaveSkin', function(skin, clothes)
-    local src = source
-    local citizenid = getCitizenId(src)
+    local citizenid = getCitizenId(source)
+    if not citizenid then return end
     saveSkin(citizenid, skin)
     if clothes then saveClothes(citizenid, clothes) end
 end)
 
 RegisterNetEvent('rsg-appearance:server:LoadSkin', function()
-    local src = source
-    local citizenid = getCitizenId(src)
-    if citizenid and getSkin(citizenid) then
-        TriggerClientEvent('node7-appearance:client:ApplySkin', src, getSkin(citizenid), getClothes(citizenid))
-    else
-        TriggerClientEvent('node7-appearance:client:openCreator', src)
-    end
+    sendSavedAppearance(source, true)
 end)
 
-RegisterNetEvent('rsg-appearance:server:saveOutfit', function(newClothes, isMale, outfitName)
-    local src = source
-    local citizenid = getCitizenId(src)
-    if citizenid then
-        saveClothes(citizenid, newClothes)
-        if outfitName then
-            MySQL.query.await([[
-                INSERT INTO `player_clothing_outfits` (citizenid, name, clothing)
-                VALUES (?, ?, ?)
-                ON DUPLICATE KEY UPDATE clothing = VALUES(clothing), updated_at = CURRENT_TIMESTAMP
-            ]], { citizenid, tostring(outfitName), json.encode(normalizeClothes(newClothes)) })
-        end
+RegisterNetEvent('rsg-appearance:server:saveOutfit', function(newClothes, _isMale, outfitName)
+    local citizenid = getCitizenId(source)
+    if not citizenid then return end
+
+    saveClothes(citizenid, newClothes)
+    if outfitName then
+        saveOutfit(citizenid, newClothes, outfitName)
     end
 end)
 
 RegisterNetEvent('rsg-appearance:server:saveUseOutfit', function(clothes)
-    local src = source
-    local citizenid = getCitizenId(src)
+    local citizenid = getCitizenId(source)
     if citizenid then saveClothes(citizenid, clothes) end
 end)
 
 RegisterNetEvent('rsg-appearance:server:DeleteOutfit', function(name)
-    local src = source
-    local citizenid = getCitizenId(src)
-    if citizenid then
-        MySQL.query.await('DELETE FROM `player_clothing_outfits` WHERE citizenid = ? AND name = ?', { citizenid, tostring(name or '') })
-    end
+    local citizenid = getCitizenId(source)
+    if citizenid then deleteOutfit(citizenid, name) end
 end)
 
 lib.callback.register('rsg-appearance:server:LoadClothes', function(source)

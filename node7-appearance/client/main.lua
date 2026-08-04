@@ -13,7 +13,7 @@ local componentsFemale = {}
 local headHashTable = {}
 local textUiShowing = false
 local editorCam = nil
-local inEditor = false
+local interactionPoints = {}
 
 local function debugLog(message)
     if Config.Debug then
@@ -79,7 +79,7 @@ local function forceVisible()
 end
 
 local function nativeHasPedComponentLoaded(ped)
-    return Citizen.InvokeNative(0xA0BC8FAED8CFEB3C, ped)
+    return (Citizen.InvokeNative(0xA0BC8FAED8CFEB3C, ped, Citizen.ResultAsInteger()) or 0) ~= 0
 end
 
 local function updatePedVariation(ped)
@@ -94,18 +94,76 @@ local function updatePedVariation(ped)
     forceVisible()
 end
 
-local function setPedComponent(ped, componentHash)
+local CATEGORY_BODIES_UPPER = hash('bodies_upper')
+
+local function getCurrentBodyAssets(ped)
+    ped = ped or PlayerPedId()
+    if not DoesEntityExist(ped) or not nativeHasPedComponentLoaded(ped) then
+        return nil
+    end
+
+    local count = Citizen.InvokeNative(0x90403E8107B60E81, ped, Citizen.ResultAsInteger()) or 0
+    for index = 0, tonumber(count) - 1 do
+        local category = Citizen.InvokeNative(0x9B90842304C938A7, ped, index, 0, Citizen.ResultAsInteger())
+        if category == CATEGORY_BODIES_UPPER then
+            local drawable, albedo, normal, material = Citizen.InvokeNative(
+                0xA9C28516A6DC9D56,
+                ped,
+                index,
+                Citizen.PointerValueInt(),
+                Citizen.PointerValueInt(),
+                Citizen.PointerValueInt(),
+                Citizen.PointerValueInt()
+            )
+
+            if albedo and albedo ~= 0 and normal and normal ~= 0 and material and material ~= 0 then
+                return {
+                    drawable = drawable,
+                    albedo = albedo,
+                    normal = normal,
+                    material = material,
+                    sex = IsPedMale(ped) and 'male' or 'female',
+                    skin = cloneTable(currentSkin),
+                }
+            end
+        end
+    end
+
+    return nil
+end
+
+local function emitAppearanceApplied(reason)
+    CreateThread(function()
+        local ped = PlayerPedId()
+        local timeout = GetGameTimer() + 5000
+        while DoesEntityExist(ped) and not nativeHasPedComponentLoaded(ped) and GetGameTimer() < timeout do
+            Wait(0)
+        end
+        Wait(100)
+        TriggerEvent('node7-appearance:client:applied', {
+            reason = reason or 'appearance',
+            ped = ped,
+            skin = cloneTable(currentSkin),
+            clothes = cloneTable(currentClothes),
+            body = getCurrentBodyAssets(ped),
+        })
+    end)
+end
+
+local function setPedComponent(ped, componentHash, deferVariation)
     ped = ped or PlayerPedId()
     componentHash = tonumber(componentHash)
     if not componentHash or componentHash == 0 then return false end
 
     local ok, err = pcall(function()
         local categoryHash = Citizen.InvokeNative(0x5FF9A878C3D115B8, componentHash, not IsPedMale(ped), true)
-        if categoryHash then
+        if categoryHash and categoryHash ~= 0 then
             Citizen.InvokeNative(0x59BD177A1A48600A, ped, categoryHash)
         end
         Citizen.InvokeNative(0xD3A7B003ED343FD9, ped, componentHash, false, true, true)
-        updatePedVariation(ped)
+        if not deferVariation then
+            updatePedVariation(ped)
+        end
     end)
 
     if not ok then
@@ -115,12 +173,17 @@ local function setPedComponent(ped, componentHash)
     return ok
 end
 
-local function removePedCategory(ped, category)
+local function removePedCategory(ped, category, deferVariation)
     ped = ped or PlayerPedId()
-    local ok = pcall(function()
+    local ok, err = pcall(function()
         Citizen.InvokeNative(0xD710A5007C2AC539, ped, hash(category), 0)
-        updatePedVariation(ped)
+        if not deferVariation then
+            updatePedVariation(ped)
+        end
     end)
+    if not ok then
+        debugLog(('component remove failed: %s'):format(tostring(err)))
+    end
     return ok
 end
 
@@ -146,24 +209,65 @@ local function setPedModel(modelName)
     return true
 end
 
+local CACHEABLE_COMPONENTS = {
+    BODIES_LOWER = true,
+    BODIES_UPPER = true,
+    heads = true,
+    hair = true,
+    teeth = true,
+    eyes = true
+}
+
 local function buildComponentCaches()
+    componentsMale = {}
+    componentsFemale = {}
+    headHashTable = {}
+
     for _, item in pairs(clothesList or {}) do
         if item and item.is_multiplayer and item.hashname and item.hashname ~= '' then
             local category = item.category_hashname
-            if category == 'BODIES_LOWER' or category == 'BODIES_UPPER' or category == 'heads' or category == 'hair' or category == 'teeth' or category == 'eyes' then
+            local componentHash = tonumber(item.hash)
+            if CACHEABLE_COMPONENTS[category] and componentHash then
                 local target = item.ped_type == 'female' and componentsFemale or componentsMale
                 target[category] = target[category] or {}
-                target[category][#target[category] + 1] = tonumber(item.hash)
+                target[category][#target[category] + 1] = componentHash
             end
-            if category == 'heads' then
-                headHashTable[item.hashname] = tonumber(item.hash)
+            if category == 'heads' and componentHash then
+                headHashTable[item.hashname] = componentHash
             end
         end
     end
     debugLog('component caches ready')
 end
 
-CreateThread(buildComponentCaches)
+local function addInteractionPoint(entry, interactionType)
+    if type(entry) ~= 'table' or type(entry.coords) ~= 'table' then return end
+    local coords = entry.coords
+    local radius = tonumber(entry.radius) or 2.0
+    interactionPoints[#interactionPoints + 1] = {
+        label = entry.label or (interactionType == 'wardrobe' and 'Wardrobe' or 'Tailor'),
+        type = interactionType,
+        x = tonumber(coords.x) or 0.0,
+        y = tonumber(coords.y) or 0.0,
+        z = tonumber(coords.z) or 0.0,
+        radiusSquared = radius * radius
+    }
+end
+
+local function buildInteractionPoints()
+    interactionPoints = {}
+    for _, shop in ipairs(Config.Shops or {}) do
+        addInteractionPoint(shop, 'clothing')
+    end
+    for _, wardrobe in ipairs(Config.Wardrobes or {}) do
+        addInteractionPoint(wardrobe, 'wardrobe')
+    end
+end
+
+CreateThread(function()
+    buildComponentCaches()
+    buildInteractionPoints()
+end)
 
 local function getSkinColorFromBodySize(body, color)
     body = tonumber(body) or 1
@@ -217,18 +321,18 @@ local function applyBody(ped, skin)
     local headNum = math.ceil((tonumber(skin.head) or 1) / 6)
 
     if components.BODIES_UPPER and components.BODIES_UPPER[bodyIndex] then
-        setPedComponent(ped, components.BODIES_UPPER[bodyIndex])
+        setPedComponent(ped, components.BODIES_UPPER[bodyIndex], true)
     end
     if components.BODIES_LOWER and components.BODIES_LOWER[bodyIndex] then
-        setPedComponent(ped, components.BODIES_LOWER[bodyIndex])
+        setPedComponent(ped, components.BODIES_LOWER[bodyIndex], true)
     end
-    setPedComponent(ped, getHeadHash(IsPedMale(ped), headNum, skin.skin_tone))
+    setPedComponent(ped, getHeadHash(IsPedMale(ped), headNum, skin.skin_tone), true)
 
     if components.eyes and components.eyes[tonumber(skin.eyes_color) or 1] then
-        setPedComponent(ped, components.eyes[tonumber(skin.eyes_color) or 1])
+        setPedComponent(ped, components.eyes[tonumber(skin.eyes_color) or 1], true)
     end
     if components.teeth and components.teeth[tonumber(skin.teeth) or 1] then
-        setPedComponent(ped, components.teeth[tonumber(skin.teeth) or 1])
+        setPedComponent(ped, components.teeth[tonumber(skin.teeth) or 1], true)
     end
 
     if Data and Data.Appearance then
@@ -283,58 +387,70 @@ local function getItemHash(list, model, texture)
     return tonumber(list[model][texture].hash)
 end
 
-local function applyClothingItem(category)
+local function applyClothingItem(category, ped, deferVariation)
     local item = currentClothes[category]
-    if not item then return end
+    if not item then return false end
+
+    ped = ped or PlayerPedId()
     if item.remove then
-        removePedCategory(PlayerPedId(), category)
-        return
+        return removePedCategory(ped, category, deferVariation)
     end
-    if item.hash then
-        setPedComponent(PlayerPedId(), item.hash)
-        return
+
+    local componentHash = tonumber(item.hash)
+    if not componentHash then
+        componentHash = getItemHash(getClothingList(category), item.model, item.texture)
+        item.hash = componentHash
     end
-    local list = getClothingList(category)
-    local itemHash = getItemHash(list, item.model, item.texture)
-    if itemHash then
-        item.hash = itemHash
-        setPedComponent(PlayerPedId(), itemHash)
-    end
+
+    return componentHash and setPedComponent(ped, componentHash, deferVariation) or false
 end
 
-local function applyHairItem(category)
+local function applyHairItem(category, ped, deferVariation)
     local item = currentSkin[category]
-    if not item then return end
+    if not item then return false end
+
+    ped = ped or PlayerPedId()
     local categoryHash = category == 'hair' and 0x864B03AE or 0xF8016BCA
     if item.remove or tonumber(item.model) == 0 then
-        Citizen.InvokeNative(0xD710A5007C2AC539, PlayerPedId(), categoryHash, 0)
-        updatePedVariation(PlayerPedId())
-        return
+        local ok, err = pcall(function()
+            Citizen.InvokeNative(0xD710A5007C2AC539, ped, categoryHash, 0)
+            if not deferVariation then
+                updatePedVariation(ped)
+            end
+        end)
+        if not ok then
+            debugLog(('hair remove failed: %s'):format(tostring(err)))
+        end
+        return ok
     end
-    if item.hash then
-        setPedComponent(PlayerPedId(), item.hash)
-        return
+
+    local componentHash = tonumber(item.hash)
+    if not componentHash then
+        componentHash = getItemHash(getHairList(category), item.model, item.texture)
+        item.hash = componentHash
     end
-    local list = getHairList(category)
-    local itemHash = getItemHash(list, item.model, item.texture)
-    if itemHash then
-        item.hash = itemHash
-        setPedComponent(PlayerPedId(), itemHash)
-    end
+
+    return componentHash and setPedComponent(ped, componentHash, deferVariation) or false
 end
 
-local function applyClothes(clothes)
-    if type(clothes) ~= 'table' then clothes = {} end
-    currentClothes = cloneTable(clothes) or {}
-    if next(currentClothes) == nil then
-        forceVisible()
-        return
-    end
+local function applyClothes(clothes, suppressAppliedEvent)
+    currentClothes = type(clothes) == 'table' and (cloneTable(clothes) or {}) or {}
+    local ped = PlayerPedId()
+    local changed = false
+
     for category in pairs(currentClothes) do
-        applyClothingItem(category)
+        changed = applyClothingItem(category, ped, true) or changed
         Wait(0)
     end
-    forceVisible()
+
+    if changed then
+        updatePedVariation(ped)
+    else
+        forceVisible()
+    end
+    if not suppressAppliedEvent then
+        emitAppearanceApplied('clothes')
+    end
 end
 
 local function applySkin(skin, clothes)
@@ -353,10 +469,11 @@ local function applySkin(skin, clothes)
     if skin.beard then applyHairItem('beard') end
 
     if clothes then
-        applyClothes(clothes)
+        applyClothes(clothes, true)
     end
 
     forceVisible()
+    emitAppearanceApplied('skin')
 end
 
 local function saveSkin()
@@ -365,6 +482,15 @@ end
 
 local function saveClothes()
     TriggerServerEvent('node7-appearance:server:saveClothes', currentClothes)
+end
+
+local function requestSavedAppearance()
+    TriggerServerEvent('node7-appearance:server:loadSaved')
+end
+
+local function repairVisibility()
+    forceVisible()
+    notify('Visibility repaired.', 'success')
 end
 
 local function startCamera()
@@ -388,14 +514,12 @@ local function stopCamera()
 end
 
 local function enterEditorCamera()
-    inEditor = true
     DisplayRadar(false)
     startCamera()
     forceVisible()
 end
 
 local function exitEditorCamera()
-    inEditor = false
     stopCamera()
     DisplayRadar(true)
     forceVisible()
@@ -427,8 +551,8 @@ openAppearanceMenu = function()
             { title = 'Character Creator', description = 'Body, face, hair, and base appearance.', icon = 'user', onSelect = openCreatorMenu },
             { title = 'Clothing Store', description = 'Edit clothing with ox_lib menus.', icon = 'shirt', onSelect = openClothingMenu },
             { title = 'Wardrobe / Outfits', description = 'Use, save, or delete outfits.', icon = 'box-open', onSelect = openWardrobeMenu },
-            { title = 'Load Saved Appearance', description = 'Reload saved skin and clothing.', icon = 'rotate-right', onSelect = function() TriggerServerEvent('node7-appearance:server:loadSaved') end },
-            { title = 'Fix Visibility', description = 'Force visible ped/collision repair.', icon = 'eye', onSelect = function() forceVisible(); notify('Visibility repaired.', 'success') end }
+            { title = 'Load Saved Appearance', description = 'Reload saved skin and clothing.', icon = 'rotate-right', onSelect = requestSavedAppearance },
+            { title = 'Fix Visibility', description = 'Force visible ped/collision repair.', icon = 'eye', onSelect = repairVisibility }
         }
     })
     lib.showContext('node7_appearance_main')
@@ -540,11 +664,34 @@ openHairMenu = function()
     lib.showContext('node7_appearance_hair')
 end
 
+local function normalizeClothingItem(list, model, texture, remove)
+    local normalizedModel = normalizeNumber(model, 0, 0, #list)
+    local textureMax = normalizedModel > 0 and list[normalizedModel] and #list[normalizedModel] or 1
+    local item = {
+        model = normalizedModel,
+        texture = normalizeNumber(texture, 1, 1, textureMax),
+        remove = remove == true
+    }
+    if not item.remove then
+        item.hash = getItemHash(list, item.model, item.texture)
+    end
+    return item, textureMax
+end
+
 local function categoryStatus(category)
     local item = currentClothes[category]
     if type(item) ~= 'table' then return 'Not selected' end
     if item.remove then return 'Removed' end
     return ('Model %s / Texture %s'):format(tostring(item.model or 0), tostring(item.texture or 1))
+end
+
+local function promptSaveCurrentOutfit()
+    local input = lib.inputDialog('Save Outfit', {
+        { type = 'input', label = 'Outfit Name', required = true, min = 1, max = 64 }
+    })
+    if input and input[1] then
+        TriggerServerEvent('node7-appearance:server:saveOutfit', currentClothes, input[1])
+    end
 end
 
 openClothingMenu = function()
@@ -562,12 +709,7 @@ openClothingMenu = function()
         end
     end
     options[#options + 1] = { title = 'Save Clothes', description = 'Save current clothing to citizenid.', icon = 'floppy-disk', onSelect = saveClothes }
-    options[#options + 1] = { title = 'Save As Outfit', description = 'Name and save current outfit.', icon = 'box-archive', onSelect = function()
-        local input = lib.inputDialog('Save Outfit', { { type = 'input', label = 'Outfit Name', required = true, min = 1, max = 64 } })
-        if input and input[1] then
-            TriggerServerEvent('node7-appearance:server:saveOutfit', currentClothes, input[1])
-        end
-    end }
+    options[#options + 1] = { title = 'Save As Outfit', description = 'Name and save current outfit.', icon = 'box-archive', onSelect = promptSaveCurrentOutfit }
     options[#options + 1] = { title = 'Wardrobe / Outfits', icon = 'box-open', onSelect = openWardrobeMenu }
     options[#options + 1] = { title = 'Fix Visibility', icon = 'eye', onSelect = forceVisible }
 
@@ -577,24 +719,15 @@ end
 
 openClothingCategory = function(category)
     local list = getClothingList(category) or {}
-    local item = currentClothes[category]
-    if type(item) ~= 'table' then item = { model = 0, texture = 1 } end
+    local selected = currentClothes[category]
+    if type(selected) ~= 'table' then selected = { model = 0, texture = 1 } end
 
-    local model = normalizeNumber(item.model, 0, 0, #list)
-    local texture = normalizeNumber(item.texture, 1, 1, 999)
-    local textureMax = 1
-    if model > 0 and list[model] then textureMax = #list[model] end
-    texture = normalizeNumber(texture, 1, 1, textureMax)
+    local item, textureMax = normalizeClothingItem(list, selected.model, selected.texture, selected.remove)
+    local model = item.model
+    local texture = item.texture
 
     local function setAndReopen(newModel, newTexture, remove)
-        currentClothes[category] = {
-            model = normalizeNumber(newModel, 0, 0, #list),
-            texture = normalizeNumber(newTexture, 1, 1, textureMax),
-            remove = remove == true
-        }
-        if not currentClothes[category].remove then
-            currentClothes[category].hash = getItemHash(list, currentClothes[category].model, currentClothes[category].texture)
-        end
+        currentClothes[category] = normalizeClothingItem(list, newModel, newTexture, remove)
         applyClothingItem(category)
         openClothingCategory(category)
     end
@@ -649,12 +782,7 @@ openWardrobeMenu = function()
                 end
             }
         end
-        options[#options + 1] = { title = 'Save Current Outfit', icon = 'floppy-disk', onSelect = function()
-            local input = lib.inputDialog('Save Outfit', { { type = 'input', label = 'Outfit Name', required = true, min = 1, max = 64 } })
-            if input and input[1] then
-                TriggerServerEvent('node7-appearance:server:saveOutfit', currentClothes, input[1])
-            end
-        end }
+        options[#options + 1] = { title = 'Save Current Outfit', icon = 'floppy-disk', onSelect = promptSaveCurrentOutfit }
         options[#options + 1] = { title = 'Reload Saved Clothes', icon = 'rotate-right', onSelect = function()
             local clothes = lib.callback.await('node7-appearance:server:getClothes', false) or {}
             applyClothes(clothes)
@@ -683,46 +811,47 @@ RegisterNetEvent('node7-appearance:client:openWardrobe', function()
     refreshState(function() openWardrobeMenu() end)
 end)
 
-RegisterNetEvent('node7-appearance:client:ApplySkin', function(skin, clothes)
-    applySkin(skin, clothes)
-end)
-
-RegisterNetEvent('node7-appearance:client:ApplyClothes', function(clothes)
+local function handleApplyClothes(clothes)
     applyClothes(clothes)
-end)
+end
 
-RegisterNetEvent('node7-appearance:client:loadSaved', function()
-    TriggerServerEvent('node7-appearance:server:loadSaved')
-end)
+RegisterNetEvent('node7-appearance:client:ApplySkin', applySkin)
+RegisterNetEvent('node7-appearance:client:ApplyClothes', handleApplyClothes)
+
+RegisterNetEvent('node7-appearance:client:loadSaved', requestSavedAppearance)
 
 -- Compatibility aliases for converted RSG resources.
 RegisterNetEvent('rsg-appearance:client:OpenCreator', function(data)
     TriggerEvent('node7-appearance:client:openCreator', data)
 end)
 
-RegisterNetEvent('rsg-appearance:client:ApplySkin', function(skin, clothes)
-    applySkin(skin, clothes)
-end)
-
-RegisterNetEvent('rsg-appearance:client:ApplyClothes', function(clothes, target)
-    applyClothes(clothes)
-end)
+RegisterNetEvent('rsg-appearance:client:ApplySkin', applySkin)
+RegisterNetEvent('rsg-appearance:client:ApplyClothes', handleApplyClothes)
 
 RegisterNetEvent('rsg-appearance:client:outfits', function()
     openWardrobeMenu()
 end)
 
-RegisterCommand('appearance', function() TriggerEvent('node7-appearance:client:open') end, false)
-RegisterCommand('creator', function() TriggerEvent('node7-appearance:client:openCreator') end, false)
-RegisterCommand('charcreator', function() TriggerEvent('node7-appearance:client:openCreator') end, false)
-RegisterCommand('clothing', function() TriggerEvent('node7-appearance:client:openClothing') end, false)
-RegisterCommand('clothes', function() TriggerEvent('node7-appearance:client:openClothing') end, false)
-RegisterCommand('tailor', function() TriggerEvent('node7-appearance:client:openClothing') end, false)
-RegisterCommand('wardrobe', function() TriggerEvent('node7-appearance:client:openWardrobe') end, false)
-RegisterCommand('outfits', function() TriggerEvent('node7-appearance:client:openWardrobe') end, false)
-RegisterCommand('loadappearance', function() TriggerServerEvent('node7-appearance:server:loadSaved') end, false)
-RegisterCommand('loadskin', function() TriggerServerEvent('node7-appearance:server:loadSaved') end, false)
-RegisterCommand('fixvisible', function() forceVisible(); notify('Visibility repaired.', 'success') end, false)
+local function registerCommandAliases(commands, handler)
+    for _, command in ipairs(commands) do
+        RegisterCommand(command, handler, false)
+    end
+end
+
+registerCommandAliases({ 'appearance' }, function()
+    TriggerEvent('node7-appearance:client:open')
+end)
+registerCommandAliases({ 'creator', 'charcreator' }, function()
+    TriggerEvent('node7-appearance:client:openCreator')
+end)
+registerCommandAliases({ 'clothing', 'clothes', 'tailor' }, function()
+    TriggerEvent('node7-appearance:client:openClothing')
+end)
+registerCommandAliases({ 'wardrobe', 'outfits' }, function()
+    TriggerEvent('node7-appearance:client:openWardrobe')
+end)
+registerCommandAliases({ 'loadappearance', 'loadskin', 'rc' }, requestSavedAppearance)
+registerCommandAliases({ 'fixvisible' }, repairVisibility)
 
 CreateThread(function()
     Wait(1500)
@@ -732,53 +861,44 @@ CreateThread(function()
     end)
 end)
 
+local function getNearbyInteraction(coords)
+    for _, point in ipairs(interactionPoints) do
+        local dx = coords.x - point.x
+        local dy = coords.y - point.y
+        local dz = coords.z - point.z
+        if (dx * dx + dy * dy + dz * dz) <= point.radiusSquared then
+            return point
+        end
+    end
+end
+
+local function interactionControlReleased()
+    for _, control in ipairs(Config.OpenControls or {}) do
+        if IsControlJustReleased(0, control)
+            or IsControlJustReleased(1, control)
+            or IsControlJustReleased(2, control) then
+            return true
+        end
+    end
+    return false
+end
+
 CreateThread(function()
     while true do
-        local waitTime = 1000
-        local ped = PlayerPedId()
-        local coords = GetEntityCoords(ped)
-        local nearLabel = nil
-        local nearType = nil
+        local point = getNearbyInteraction(GetEntityCoords(PlayerPedId()))
+        local waitTime = point and 0 or 1000
 
-        for _, shop in ipairs(Config.Shops or {}) do
-            local c = shop.coords
-            local distance = #(coords - vector3(c.x, c.y, c.z))
-            if distance <= (shop.radius or 2.0) then
-                nearLabel = shop.label or 'Tailor'
-                nearType = 'clothing'
-                waitTime = 0
-                break
-            end
-        end
-
-        if not nearLabel then
-            for _, wardrobe in ipairs(Config.Wardrobes or {}) do
-                local c = wardrobe.coords
-                local distance = #(coords - vector3(c.x, c.y, c.z))
-                if distance <= (wardrobe.radius or 2.0) then
-                    nearLabel = wardrobe.label or 'Wardrobe'
-                    nearType = 'wardrobe'
-                    waitTime = 0
-                    break
-                end
-            end
-        end
-
-        if nearLabel then
+        if point then
             if not textUiShowing then
-                lib.showTextUI(('[E] %s'):format(nearLabel))
+                lib.showTextUI(('[E] %s'):format(point.label))
                 textUiShowing = true
             end
-            for _, control in ipairs(Config.OpenControls or {}) do
-                if IsControlJustReleased(0, control) or IsControlJustReleased(1, control) or IsControlJustReleased(2, control) then
-                    if nearType == 'wardrobe' then
-                        TriggerEvent('node7-appearance:client:openWardrobe')
-                    else
-                        TriggerEvent('node7-appearance:client:openClothing')
-                    end
-                    Wait(500)
-                    break
-                end
+
+            if interactionControlReleased() then
+                TriggerEvent(point.type == 'wardrobe'
+                    and 'node7-appearance:client:openWardrobe'
+                    or 'node7-appearance:client:openClothing')
+                Wait(500)
             end
         elseif textUiShowing then
             lib.hideTextUI()
@@ -804,4 +924,15 @@ exports('ApplySkin', applySkin)
 exports('ApplyClothes', applyClothes)
 exports('GetCurrentSkin', function() return currentSkin end)
 exports('GetCurrentClothes', function() return currentClothes end)
+exports('TattooBridgeReady', function() return true end)
+exports('GetTattooBodyTextureSet', function()
+    local body = getCurrentBodyAssets(PlayerPedId())
+    if body then body.source = 'node7-appearance-export' end
+    return body
+end)
+exports('RefreshTattooBodyTextureSet', function()
+    updatePedVariation(PlayerPedId())
+    emitAppearanceApplied('tattoo_refresh')
+    return getCurrentBodyAssets(PlayerPedId())
+end)
 exports('FixVisibility', forceVisible)
