@@ -139,13 +139,21 @@ local function emitAppearanceApplied(reason)
         while DoesEntityExist(ped) and not nativeHasPedComponentLoaded(ped) and GetGameTimer() < timeout do
             Wait(0)
         end
+
+        -- Do not inspect live MetaPed component assets here. The inspection native used
+        -- by the tattoo bridge is not safe as part of the normal reload path on every
+        -- RedM build and could prevent the completion event from firing. Barber and
+        -- clothing integrations only need a reliable completion signal plus skin data.
         Wait(100)
         TriggerEvent('node7-appearance:client:applied', {
             reason = reason or 'appearance',
             ped = ped,
             skin = cloneTable(currentSkin),
             clothes = cloneTable(currentClothes),
-            body = getCurrentBodyAssets(ped),
+            body = {
+                sex = IsPedMale(ped) and 'male' or 'female',
+                skin = cloneTable(currentSkin),
+            },
         })
     end)
 end
@@ -160,6 +168,8 @@ local function setPedComponent(ped, componentHash, deferVariation)
         if categoryHash and categoryHash ~= 0 then
             Citizen.InvokeNative(0x59BD177A1A48600A, ped, categoryHash)
         end
+        -- RedM MP shop items use the normal final=true commit path.
+        -- Facial hair does not persist reliably when this flag is false.
         Citizen.InvokeNative(0xD3A7B003ED343FD9, ped, componentHash, false, true, true)
         if not deferVariation then
             updatePedVariation(ped)
@@ -433,6 +443,21 @@ local function applyHairItem(category, ped, deferVariation)
     return componentHash and setPedComponent(ped, componentHash, deferVariation) or false
 end
 
+local function restoreHairAndBeardAfterClothes(ped)
+    ped = ped or PlayerPedId()
+
+    -- Clothing rebuilds can remove MetaPed hair categories. Apply hair after the
+    -- clothing variation pass, then make beard the absolute final component with
+    -- no variation refresh after it. This preserves paid barber beards through
+    -- /rc, /loadskin, masks, bandanas, and outfit reloads.
+    if currentSkin.hair then
+        applyHairItem('hair', ped, false)
+    end
+    if currentSkin.beard then
+        applyHairItem('beard', ped, true)
+    end
+end
+
 local function applyClothes(clothes, suppressAppliedEvent)
     currentClothes = type(clothes) == 'table' and (cloneTable(clothes) or {}) or {}
     local ped = PlayerPedId()
@@ -448,6 +473,10 @@ local function applyClothes(clothes, suppressAppliedEvent)
     else
         forceVisible()
     end
+
+    restoreHairAndBeardAfterClothes(ped)
+    forceVisible()
+
     if not suppressAppliedEvent then
         emitAppearanceApplied('clothes')
     end
@@ -465,11 +494,12 @@ local function applySkin(skin, clothes)
     applyBody(ped, skin)
     applyFeatures(ped, skin)
 
-    if skin.hair then applyHairItem('hair') end
-    if skin.beard then applyHairItem('beard') end
-
+    -- Clothing must be applied before hair/beard. The previous order applied the
+    -- beard first and then removed it again during the clothing MetaPed rebuild.
     if clothes then
         applyClothes(clothes, true)
+    else
+        restoreHairAndBeardAfterClothes(ped)
     end
 
     forceVisible()
@@ -819,6 +849,25 @@ RegisterNetEvent('node7-appearance:client:ApplySkin', applySkin)
 RegisterNetEvent('node7-appearance:client:ApplyClothes', handleApplyClothes)
 
 RegisterNetEvent('node7-appearance:client:loadSaved', requestSavedAppearance)
+
+local function setBarberState(style, savedSkin)
+    if type(savedSkin) == 'table' then
+        currentSkin = cloneTable(savedSkin) or currentSkin
+    end
+
+    if type(style) == 'table' then
+        if type(style.hair) == 'table' then currentSkin.hair = cloneTable(style.hair) end
+        if type(style.beard) == 'table' then currentSkin.beard = cloneTable(style.beard) end
+    end
+
+    return true
+end
+
+RegisterNetEvent('node7-appearance:client:setBarberState', function(style, savedSkin)
+    setBarberState(style, savedSkin)
+end)
+
+exports('SetBarberState', setBarberState)
 
 -- Compatibility aliases for converted RSG resources.
 RegisterNetEvent('rsg-appearance:client:OpenCreator', function(data)

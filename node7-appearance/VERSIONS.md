@@ -1,3 +1,15 @@
+## 1.2.1
+
+- Corrected RedM `ApplyShopItemToPed` calls to use the build-safe final flag `false`, preventing masks and clothing compatibility passes from suppressing saved beard components.
+
+## 1.2.0
+
+- Fixed `/rc`, `/loadskin`, and `/loadappearance` removing saved barber beards.
+- Clothing now rebuilds first; hair is restored afterward and beard is always the final MetaPed component.
+- No full MetaPed variation refresh runs after the beard is applied.
+- Removed unsafe live body-component inspection from the normal appearance-completion event so barber restoration always receives the event.
+- Kept the tattoo body-texture bridge export available for explicit tattoo integrations.
+
 # Versions
 
 ## 1.1.0

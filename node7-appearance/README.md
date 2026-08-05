@@ -27,3 +27,12 @@ No node7-menu-base, NUI, RSG core, or rsg-menubase dependency.
 - Prebuilt shop and wardrobe interaction points and reduced proximity-loop work.
 - Prevented repeated failing legacy-column ALTER attempts on resource startup.
 - Cleaned unused state and redundant JSON encoding.
+
+## Barber persistence
+
+Appearance reloads apply clothing first, then restore hair and beard. Beard is the final MetaPed component, allowing optional `node7-barbers` state to remain visible after `/rc`, `/loadskin`, masks, bandanas, and outfit reloads.
+
+
+## 1.3.0 barber cache synchronization
+- Corrected RedM MP shop-item apply flags.
+- Added `SetBarberState` so paid hair/beard changes immediately update the live appearance cache.
