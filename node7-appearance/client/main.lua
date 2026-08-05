@@ -8,6 +8,9 @@ local clothing = require 'data.clothing'
 
 local currentSkin = {}
 local currentClothes = {}
+local automaticLoadPending = false
+local automaticLoadCompleted = false
+local automaticLoadRevision = 0
 local componentsMale = {}
 local componentsFemale = {}
 local headHashTable = {}
@@ -518,6 +521,48 @@ local function requestSavedAppearance()
     TriggerServerEvent('node7-appearance:server:loadSaved')
 end
 
+local function scheduleAutomaticSavedAppearance(reason)
+    if automaticLoadPending or automaticLoadCompleted then return end
+
+    automaticLoadPending = true
+    automaticLoadRevision = automaticLoadRevision + 1
+    local revision = automaticLoadRevision
+
+    CreateThread(function()
+        -- Charselect emits Node7Core:Client:OnPlayerLoaded after positioning the ped.
+        -- Let its final fade/loading cleanup finish before performing the one fresh rc.
+        Wait(900)
+
+        local deadline = GetGameTimer() + 20000
+        while revision == automaticLoadRevision and not automaticLoadCompleted and GetGameTimer() < deadline do
+            local ped = PlayerPedId()
+            if ped and ped ~= 0 and DoesEntityExist(ped) then
+                local state = lib.callback.await('node7-appearance:server:getState', false) or {}
+                if state.citizenid and type(state.skin) == 'table' then
+                    currentSkin = mergeDefaults(state.skin)
+                    currentClothes = cloneTable(state.clothes or {}) or {}
+                    applySkin(currentSkin, currentClothes)
+                    automaticLoadCompleted = true
+                    debugLog(('automatic saved appearance applied once after player load (%s)'):format(reason or 'player-loaded'))
+                    break
+                end
+            end
+
+            Wait(500)
+        end
+
+        if revision == automaticLoadRevision then
+            automaticLoadPending = false
+        end
+    end)
+end
+
+local function resetAutomaticSavedAppearance()
+    automaticLoadRevision = automaticLoadRevision + 1
+    automaticLoadPending = false
+    automaticLoadCompleted = false
+end
+
 local function repairVisibility()
     forceVisible()
     notify('Visibility repaired.', 'success')
@@ -902,12 +947,25 @@ end)
 registerCommandAliases({ 'loadappearance', 'loadskin', 'rc' }, requestSavedAppearance)
 registerCommandAliases({ 'fixvisible' }, repairVisibility)
 
+RegisterNetEvent('Node7Core:Client:OnPlayerLoaded', function()
+    scheduleAutomaticSavedAppearance('charselect-spawn')
+end)
+
+RegisterNetEvent('Node7Core:Client:OnPlayerUnload', function()
+    resetAutomaticSavedAppearance()
+end)
+
 CreateThread(function()
     Wait(1500)
     refreshState(function(state)
         currentSkin = mergeDefaults(state.skin or currentSkin)
         currentClothes = cloneTable(state.clothes or currentClothes) or {}
     end)
+
+    -- Covers restarting node7-appearance while a character is already loaded.
+    if LocalPlayer and LocalPlayer.state and LocalPlayer.state.isLoggedIn then
+        scheduleAutomaticSavedAppearance('resource-start')
+    end
 end)
 
 local function getNearbyInteraction(coords)

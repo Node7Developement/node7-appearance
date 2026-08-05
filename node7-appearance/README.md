@@ -9,6 +9,10 @@ NODE7 RedM appearance, creator, clothing, and wardrobe system using ox_lib menus
 
 `node7-players` remains optional compatibility support and is not a dependency.
 
+## Automatic character-load refresh
+
+After `node7-charselect` finishes spawning a selected character and emits `Node7Core:Client:OnPlayerLoaded`, this resource performs one guarded saved-appearance reload equivalent to `/loadskin`. It waits for the active character and ped to be ready, applies the saved skin and clothing once, and resets only when `Node7Core:Client:OnPlayerUnload` fires. Restarting this resource while already logged in also performs one refresh.
+
 ## Commands
 - `/appearance`
 - `/creator` or `/charcreator`

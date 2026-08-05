@@ -1,3 +1,11 @@
+## 1.4.0
+
+- Added one automatic saved `/loadskin`-equivalent refresh after `Node7Core:Client:OnPlayerLoaded`.
+- Waits until the selected character and saved appearance are ready before applying.
+- Guards against duplicate refreshes during the same character session.
+- Resets the one-time guard only on `Node7Core:Client:OnPlayerUnload`.
+- Supports one refresh when `node7-appearance` restarts while a character is already loaded.
+
 ## 1.2.1
 
 - Corrected RedM `ApplyShopItemToPed` calls to use the build-safe final flag `false`, preventing masks and clothing compatibility passes from suppressing saved beard components.
