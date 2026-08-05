@@ -1,16 +1,5 @@
-[README.md](https://github.com/user-attachments/files/30717015/README.md)
-[README.md](https://github.com/user-attachments/files/30333640/README.md)
+[README.md](https://github.com/user-attachments/files/30724312/README.md)
 # node7-appearance
-
-NODE7 RedM appearance, creator, clothing, and wardrobe system converted from rsg-appearance data for ox_lib menus.
-
-## Required
-- ox_lib
-- oxmysql
-- node7-core
-- node7-players
-
-## Commands# node7-appearance
 
 NODE7 RedM appearance, creator, clothing, and wardrobe system using ox_lib menus.
 
@@ -40,19 +29,11 @@ No node7-menu-base, NUI, RSG core, or rsg-menubase dependency.
 - Prevented repeated failing legacy-column ALTER attempts on resource startup.
 - Cleaned unused state and redundant JSON encoding.
 
-- /appearance
-- /creator
-- /clothing
-- /wardrobe
-- /outfits
-- /loadappearance
-- /fixvisible
-- /openappearance [id] - admin ACE: node7.appearance.admin
+## Barber persistence
 
-No node7-menu-base. No NUI. No RSG core. No rsg-menubase.
+Appearance reloads apply clothing first, then restore hair and beard. Beard is the final MetaPed component, allowing optional `node7-barbers` state to remain visible after `/rc`, `/loadskin`, masks, bandanas, and outfit reloads.
 
 
-## v1.0.1
-- Fixed active character lookup for RSG-format node7-core.
-- Removed hard node7-players dependency; node7-players is now optional compatibility only.
-- Added server state-bag citizenid bridge on Node7Core player load.
+## 1.3.0 barber cache synchronization
+- Corrected RedM MP shop-item apply flags.
+- Added `SetBarberState` so paid hair/beard changes immediately update the live appearance cache.
